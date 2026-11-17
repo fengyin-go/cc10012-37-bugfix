@@ -10,6 +10,7 @@
         <button class="btn" type="button" @click="exportRows">导出定时任务清单</button>
       </div>
     </header>
+    <ModuleSummaryPanel :summary="summary" :code-label="columns[0]" />
 
     <div class="stat-row">
       <article v-for="item in stats" :key="item.label" class="stat-card">
@@ -64,7 +65,8 @@
     </table>
 
     <footer class="page-foot">
-      <span>共 {{ total }} 条定时任务记录</span>
+      <span>列表条目 {{ total }} 条（全量登记 {{ summary.total }} 条，待处理 {{ summary.pending }} 条，异常 {{ summary.abnormal }} 条）</span>
+      <span v-if="noticeMessage" class="notice-text">{{ noticeMessage }}</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
   </section>
@@ -77,25 +79,33 @@ import {
   downloadEntries,
   listEntries,
   moduleMeta,
+  moduleSummary as loadModuleSummary,
+  metricValue,
   runAction as applyAction,
 } from '@/api/local-service'
-import type { EntryRow } from '@/data/types'
+import ModuleSummaryPanel from '@/components/ModuleSummaryPanel.vue'
+import type { EntryRow, ModuleSummary } from '@/data/types'
 
 const meta = moduleMeta('schedule')
 const columns = ["配置编号", "关联任务", "调度表达式", "时区设定", "前置任务", "最大并发数", "失败重试策略", "超时终止"]
 const actions = ["提交校验", "启用调度", "停用调度"]
 const statuses = ["草稿", "待校验", "已启用", "已停用"]
-const stats = [{"label": "调度配置总数", "value": 0}, {"label": "已启用配置", "value": 0}, {"label": "待校验配置", "value": 0}]
 
 const rows = ref<EntryRow[]>([])
 const total = ref(0)
 const errorMessage = ref('')
+const noticeMessage = ref('')
+// 业务模块汇总结果数据明细：与表格共用同一份记录快照，检索不改变全量汇总。
+const summary = ref<ModuleSummary>(loadModuleSummary(meta.key))
+const stats = computed(() =>
+  meta.metrics.map((label) => ({ label, value: metricValue(meta.key, label, summary.value) })),
+)
 const filters = ref<Record<string, string>>({})
 const filterFields = columns.slice(0, 3)
 const statusSummary = computed(() =>
   statuses.map((status: string) => ({
     status,
-    count: rows.value.filter((row) => String(row.status) === status).length,
+    count: summary.value.records.filter((row) => row.status === status).length,
   })),
 )
 
@@ -105,7 +115,8 @@ function resetFilters() {
 }
 
 function exportRows() {
-  downloadEntries(meta.key)
+  // 导出结果与当前列表条目一致：把检索条件一并传给导出。
+  downloadEntries(meta.key, filters.value)
 }
 
 function openCreate() {
@@ -114,20 +125,31 @@ function openCreate() {
 
 function runAction(action: string, row: EntryRow) {
   errorMessage.value = ''
+  noticeMessage.value = ''
   const result = applyAction(meta.key, Number(row.id), action)
   if (!result.ok) {
     errorMessage.value = result.message
+    if (result.summary) {
+      summary.value = result.summary
+    }
     return
   }
+  // 回执直接采用动作基于同一份记录快照重算出的汇总明细，刷新前后数量不会分叉。
+  if (result.summary) {
+    summary.value = result.summary
+  }
+  noticeMessage.value = result.message
   reload()
 }
 
 function reload() {
   errorMessage.value = ''
   try {
+    // 检索条件只影响当前表格；汇总明细始终读取模块全量记录快照。
     const payload = listEntries(meta.key, filters.value)
     rows.value = payload.items
     total.value = payload.total
+    summary.value = loadModuleSummary(meta.key)
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '定时任务列表读取失败'
   }
